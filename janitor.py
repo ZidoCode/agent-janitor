@@ -6,8 +6,8 @@ Design:
   accumulating evidence: dead parent, port listener, dev-server traits,
   uptime beyond a TTL, or a match against the ledger of a process-spawning
   tool call (when agent-ledger is installed alongside).
-- DRY_RUN everywhere by default. Nothing dies without a license-gated
-  enforce mode (same trust model as agent-ledger Pro).
+- DRY_RUN everywhere by default. Nothing dies without an explicit
+  policy_mode=enforce opt-in (free — same trust model as agent-ledger v0.4+).
 """
 import os
 import re
@@ -30,7 +30,18 @@ DEV_TRAITS = re.compile(
 EXEMPT = re.compile(
     r"(systemd|kubelet|sshd|dbus|cron|rsyslog|polkit|snapd|"
     r"containerd|dockerd|nginx|apache|postgres|mysqld|redis-server|"
-    r"ttys|ttyd|code-server|zsh$|bash$|sh$|fish$)",
+    r"(^|[\s/])(zsh|bash|sh|fish|ash|dash)$)",
+)
+
+# ppid=1 daemons that are standard systemd boot services, not agent orphans.
+# Matched only when reparented to init — a user process with a live parent
+# running these names is NOT exempt (e.g. dev-installed postgres).
+SYSTEM_DAEMON = re.compile(
+    r"(multipathd|envd|networkd-dispatcher|udisksd|ModemManager|"
+    r"unattended-upgr|systemd-(resolve|logind|udevd|journald|timesyncd)|"
+    r"agetty|qemu-ga|acpid|irqbalance|thermald|upower|accounts-daemon|"
+    r"wpa_supplicant|cupsd|bluetoothd|chronyd|ntpd|rsync|plymouthd|"
+    r"packagekitd|switcheroo-control|polkitd|power-profiles-daemon)"
 )
 
 
@@ -57,7 +68,26 @@ def _boot_time() -> float:
 
 
 def _ports_of(pid: int) -> list:
-    """TCP listen ports held by pid (reads /proc/net/tcp, no lsof needed)."""
+    """TCP listen ports held by pid.
+
+    /proc/net/tcp gives (inode, uid, ...) columns — uid is col 7, NOT pid.
+    Correct mapping: read /proc/<pid>/fd/* symlinks for socket:[inode],
+    then match those inodes against LISTEN entries in /proc/net/tcp.
+    """
+    inodes = set()
+    fd_dir = f"/proc/{pid}/fd"
+    try:
+        for fd in os.listdir(fd_dir):
+            try:
+                target = os.readlink(os.path.join(fd_dir, fd))
+                if target.startswith("socket:["):
+                    inodes.add(target[8:-1])
+            except OSError:
+                continue
+    except OSError:
+        return []
+    if not inodes:
+        return []
     ports = set()
     try:
         with open("/proc/net/tcp") as f:
@@ -66,7 +96,8 @@ def _ports_of(pid: int) -> list:
                 p = line.split()
                 if p[3] != "0A":          # 0A = LISTEN
                     continue
-                if int(p[7].split(":")[1], 16) == pid:
+                inode = p[9]
+                if inode in inodes:
                     ports.add(int(p[1].split(":")[1], 16))
     except (OSError, IndexError, ValueError):
         pass
@@ -110,7 +141,7 @@ def scan_procs(min_uptime_s: int = 60) -> list:
             continue
         hz = os.sysconf("SC_CLK_TCK")
         start_ts = btime + starttick / hz
-        out.append(Proc(pid=pid, cmd=cmd, ppid=pid if False else ppid, uid=uid,
+        out.append(Proc(pid=pid, cmd=cmd, ppid=ppid, uid=uid,
                         start_ts=start_ts, uptime_s=now - start_ts,
                         ports=_ports_of(pid), parent_alive=_alive(ppid)))
     out.sort(key=lambda p: p.pid)
@@ -120,7 +151,7 @@ def scan_procs(min_uptime_s: int = 60) -> list:
 def classify(proc: Proc, ttl_s: int = 6 * 3600, whitelist: list = None) -> Proc:
     """Attach signals + confidence tier. Never mutates anything."""
     whitelist = whitelist or []
-    wl = re.compile("|".join(whitelist)) if whitelist else None
+    wl = re.compile("|".join(re.escape(w) for w in whitelist)) if whitelist else None
     if wl and wl.search(proc.cmd):
         return proc  # whitelisted → no signals, never swept
 
@@ -128,8 +159,17 @@ def classify(proc: Proc, ttl_s: int = 6 * 3600, whitelist: list = None) -> Proc:
         return proc
 
     sig = proc.signals
-    if not proc.parent_alive:
-        sig.append("orphan (parent dead)")
+    # Linux reparents orphans to a living ancestor (init/subreaper), so
+    # parent_alive is almost always True. The reliable orphan signature is
+    # ppid == 1 (init) combined with what the process IS, not who owns it.
+    # BUT: system daemons also live at ppid=1 since boot (multipathd,
+    # udisksd, ModemManager...). They are not agent orphans — they are
+    # standard systemd daemons. Exempt them by name before flagging.
+    reparented = proc.ppid == 1
+    if reparented and SYSTEM_DAEMON.search(proc.cmd):
+        return proc  # standard system daemon — never a suspect
+    if reparented:
+        sig.append(f"reparented to init (ppid=1)")
     if proc.ports:
         sig.append(f"holds port(s) {proc.ports}")
     if DEV_TRAITS.search(proc.cmd):
@@ -137,13 +177,16 @@ def classify(proc: Proc, ttl_s: int = 6 * 3600, whitelist: list = None) -> Proc:
     if proc.uptime_s > ttl_s:
         sig.append(f"uptime {int(proc.uptime_s)}s exceeds TTL {ttl_s}s")
 
-    orphan = not proc.parent_alive
+    orphan = reparented or not proc.parent_alive
     strong = bool(proc.ports) or bool(DEV_TRAITS.search(proc.cmd))
-    if (orphan and strong) or ("uptime" in " ".join(sig) and orphan):
+    long_lived = proc.uptime_s > ttl_s
+    # confirmed: reparented + evidence of server-ish purpose, or reparented
+    # + long-lived (nobody is coming back for it)
+    if orphan and (strong or long_lived):
         proc.confidence = "confirmed"
     elif orphan:
         proc.confidence = "likely"
-    elif strong and "uptime" in " ".join(sig):
+    elif strong and long_lived:
         proc.confidence = "possible"   # alive long but parent alive → cautious
     return proc
 
@@ -154,13 +197,26 @@ def sweep_candidates(procs: list) -> list:
 
 
 def kill_process(pid: int) -> dict:
-    """SIGTERM → 2s grace → SIGKILL. Returns a report dict."""
+    """SIGTERM → 2s grace → SIGKILL, with PID-reuse verification."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmd_before = f.read().replace(b"\x00", b" ").decode(errors="replace")
+    except OSError:
+        return {"pid": pid, "result": "already gone"}
     try:
         os.kill(pid, signal.SIGTERM)
         for _ in range(20):
             if not _alive(pid):
                 return {"pid": pid, "result": "terminated (SIGTERM)"}
             time.sleep(0.1)
+        # PID-reuse race: confirm /proc/<pid> still the SAME process before -9
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd_now = f.read().replace(b"\x00", b" ").decode(errors="replace")
+            if cmd_now != cmd_before:
+                return {"pid": pid, "result": "aborted — PID reused by another process"}
+        except OSError:
+            return {"pid": pid, "result": "terminated (exited during grace)"}
         os.kill(pid, signal.SIGKILL)
         return {"pid": pid, "result": "killed (SIGKILL)"}
     except ProcessLookupError:
