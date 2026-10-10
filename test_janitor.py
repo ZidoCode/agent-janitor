@@ -45,10 +45,14 @@ t("young + parent alive = no flag", p.confidence == "")
 p = classify(mk("sshd -D", parent_alive=False, ports=[22]), TTL)
 t("system exempt (sshd)", p.confidence == "")
 
-# --- whitelist beats everything
+# --- whitelist beats everything (entries are re.escaped = literal match)
+p = classify(mk("python api.py", parent_alive=False, ports=[8000]), TTL,
+             whitelist=["api.py"])
+t("whitelisted plain = no flag", p.confidence == "")
+# escaped entry 'api\.py' is matched literally (won't match 'api.py') — by design
 p = classify(mk("python api.py", parent_alive=False, ports=[8000]), TTL,
              whitelist=["api\\.py"])
-t("whitelisted = no flag", p.confidence == "")
+t("escaped entry is literal (does NOT match)", p.confidence != "")
 
 # --- dev traits regex sanity
 for c in ["vite", "uvicorn main:app", "ngrok http 80", "cloudflared tunnel",
@@ -58,8 +62,11 @@ for c in ["vim notes.txt", "tail -f log", "grep foo bar"]:
     t(f"no dev trait: {c}", not DEV_TRAITS.search(c))
 
 # --- exempt regex sanity
-for c in ["nginx: master", "postgres: writer", "systemd --user", "ttys"]:
+for c in ["nginx: master", "postgres: writer", "systemd --user"]:
     t(f"exempt: {c}", bool(EXEMPT.search(c)))
+# ttyd REMOVED from exempt (review): agent-spawned infra must be whitelisted, not exempt
+t("exempt does NOT cover ttyd", not EXEMPT.search("/usr/local/bin/ttyd -b /term"))
+t("exempt does not match evil.sh", not EXEMPT.search("python evil.sh"))
 t("exempt does not match vite", not EXEMPT.search("vite"))
 
 # --- sweep list excludes 'possible'

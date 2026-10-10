@@ -37,13 +37,22 @@ python3 ~/.hermes/plugins/agent-janitor/janitor_cli.py sweep --ttl-h 6   # dry-r
 
 | Evidence | Tier |
 |---|---|
-| orphan (parent dead) + holds port / dev traits | **confirmed** |
-| orphan only | **likely** |
+| reparented to init (ppid=1) + holds port / dev traits / TTL exceeded | **confirmed** |
+| reparented to init (ppid=1) only | **likely** |
 | dev traits + TTL exceeded, parent alive | **possible** (never auto-swept) |
 
-Only **confirmed + likely** are killable. System processes (sshd, nginx,
-postgres, systemd…) are exempt by pattern. Whitelisted commands are never
-suspects.
+Linux reparents orphans to a living ancestor, so `ppid == 1` is the reliable
+orphan signature — combined with evidence the process has server-like purpose
+or nobody has reaped it for a long time. Only **confirmed + likely** are
+killable. System daemons that legitimately live at ppid=1 (multipathd,
+udisksd, ModemManager, systemd-*…) are exempt by name. Whitelisted commands
+are never suspects — add your real infrastructure there:
+
+```bash
+janitor whitelist add ngrok        # your intentional long-runners
+janitor whitelist add cloudflared
+janitor whitelist add tmux
+```
 
 ## Known limits (honest coverage)
 
