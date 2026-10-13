@@ -12,8 +12,6 @@ Design:
 import os
 import re
 import signal
-import socket
-import subprocess
 import time
 from dataclasses import dataclass, field
 
@@ -41,7 +39,12 @@ SYSTEM_DAEMON = re.compile(
     r"unattended-upgr|systemd-(resolve|logind|udevd|journald|timesyncd)|"
     r"agetty|qemu-ga|acpid|irqbalance|thermald|upower|accounts-daemon|"
     r"wpa_supplicant|cupsd|bluetoothd|chronyd|ntpd|rsync|plymouthd|"
-    r"packagekitd|switcheroo-control|polkitd|power-profiles-daemon)"
+    r"packagekitd|switcheroo-control|polkitd|power-profiles-daemon|"
+    # host/VM management daemons: live at ppid=1 for the machine's whole
+    # uptime, so they always "exceed TTL" — flagging them would make every
+    # first enforce sweep destroy the host's own plumbing
+    r"tailscaled|qcloud|tat_agent|sgagent|barad_agent|monitor|"
+    r"amazon-ssm-agent|walinuxagent|google_guest_agent)"
 )
 
 
@@ -68,11 +71,13 @@ def _boot_time() -> float:
 
 
 def _ports_of(pid: int) -> list:
-    """TCP listen ports held by pid.
+    """TCP listen ports held by pid (IPv4 and IPv6).
 
-    /proc/net/tcp gives (inode, uid, ...) columns — uid is col 7, NOT pid.
+    /proc/net/tcp{,6} give (inode, uid, ...) columns — uid is col 7, NOT pid.
     Correct mapping: read /proc/<pid>/fd/* symlinks for socket:[inode],
-    then match those inodes against LISTEN entries in /proc/net/tcp.
+    then match those inodes against LISTEN entries in /proc/net/tcp{,6}.
+    Skipping tcp6 would make IPv6 listeners (bind address "::") invisible —
+    a false negative on modern default binds.
     """
     inodes = set()
     fd_dir = f"/proc/{pid}/fd"
@@ -89,18 +94,19 @@ def _ports_of(pid: int) -> list:
     if not inodes:
         return []
     ports = set()
-    try:
-        with open("/proc/net/tcp") as f:
-            next(f)
-            for line in f:
-                p = line.split()
-                if p[3] != "0A":          # 0A = LISTEN
-                    continue
-                inode = p[9]
-                if inode in inodes:
-                    ports.add(int(p[1].split(":")[1], 16))
-    except (OSError, IndexError, ValueError):
-        pass
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as f:
+                next(f)
+                for line in f:
+                    p = line.split()
+                    if p[3] != "0A":          # 0A = LISTEN
+                        continue
+                    inode = p[9]
+                    if inode in inodes:
+                        ports.add(int(p[1].split(":")[-1], 16))
+        except (OSError, IndexError, ValueError):
+            continue  # tcp6 absent on IPv6-disabled kernels is normal
     return sorted(ports)
 
 
@@ -150,7 +156,9 @@ def scan_procs(min_uptime_s: int = 60) -> list:
 
 def classify(proc: Proc, ttl_s: int = 6 * 3600, whitelist: list = None) -> Proc:
     """Attach signals + confidence tier. Never mutates anything."""
-    whitelist = whitelist or []
+    # drop empty/whitespace entries: an empty string in the alternation
+    # would make the regex match EVERY command — silent global exemption
+    whitelist = [w for w in (whitelist or []) if isinstance(w, str) and w.strip()]
     wl = re.compile("|".join(re.escape(w) for w in whitelist)) if whitelist else None
     if wl and wl.search(proc.cmd):
         return proc  # whitelisted → no signals, never swept

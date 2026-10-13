@@ -71,14 +71,23 @@ Linux reparents orphans to a living ancestor, so `ppid == 1` is the reliable
 orphan signature — combined with evidence the process has server-like purpose
 or nobody has reaped it for a long time. Only **confirmed + likely** are
 killable. System daemons that legitimately live at ppid=1 (multipathd,
-udisksd, ModemManager, systemd-*…) are exempt by name. Whitelisted commands
-are never suspects — add your real infrastructure there:
+udisksd, ModemManager, systemd-*…) are exempt by name. Host/VM management
+daemons (tailscaled, cloud-provider agents like qcloud/sgagent/tat_agent,
+amazon-ssm-agent, walinuxagent, google_guest_agent) are also exempt — they
+live at ppid=1 for the machine's whole uptime and would otherwise always
+"exceed TTL". Whitelisted commands are never suspects — add your real
+infrastructure there:
 
 ```bash
 janitor whitelist add ngrok        # your intentional long-runners
 janitor whitelist add cloudflared
 janitor whitelist add tmux
 ```
+
+**Before your first enforce sweep, always dry-run and whitelist** anything
+that shows up and is actually yours — a tunnel, a reverse proxy, a service
+manager the agent legitimately started and you intentionally kept. The
+dry-run output is exactly the kill list enforce would use.
 
 ## Why these numbers
 
@@ -92,6 +101,12 @@ janitor whitelist add tmux
 - **SIGTERM → 2 s → SIGKILL, with PID-reuse check** — before the `kill -9`,
   the process's cmdline is re-read; if it changed (PID recycled), the kill
   is aborted. No PID-reuse fratricide.
+- **Uptime is boot-relative** — after suspend/hibernate, wall-clock uptime
+  keeps counting, so a process can appear older than it ran. Consequence:
+  TTL false-positives are possible on machines that sleep. On servers
+  (janitor's main target) this is moot; on laptops, prefer `--ttl-h`
+  values that exceed your longest sleep, or run check/sweep right after
+  boot.
 
 ## Threat model
 

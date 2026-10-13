@@ -40,7 +40,12 @@ HISTORY_PATH = os.path.join(DATA_DIR, "sweeps.jsonl")
 def load_whitelist() -> list:
     try:
         with open(WHITELIST_PATH) as f:
-            return json.load(f)
+            # guard: a "" (or whitespace) entry would join into an empty
+            # regex alternation and silently exempt EVERY process — drop it
+            items = json.load(f)
+            if not isinstance(items, list):
+                return []
+            return [w for w in items if isinstance(w, str) and w.strip()]
     except (OSError, ValueError):
         return []
 
