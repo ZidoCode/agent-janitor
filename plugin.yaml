@@ -1,5 +1,5 @@
 name: agent-janitor
-version: "0.3.0"
+version: "0.3.1"
 description: Process hygiene for agent machines — finds the background processes your agent left behind (dev servers, tunnels, watchers, nohup jobs) using evidence signals (ppid=1 reparent, port listener, dev-server traits, TTL exceeded), attributes them to the originating tool call via agent-ledger's ledger when present, and reaps them only after an explicit policy_mode=enforce opt-in. Dry-run by default, whitelist-first, stdlib-only, fails open.
 provides_hooks:
   - post_tool_call
