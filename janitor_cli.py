@@ -22,7 +22,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from janitor import scan, sweep_candidates, kill_process          # noqa: E402
 from ledger_bridge import terminal_calls, attribution             # noqa: E402
 
-DATA_DIR = os.path.expanduser("~/.hermes/agent-janitor")
+def _hermes_home() -> str:
+    """Active Hermes home (profile-aware), with a safe fallback."""
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), ".hermes")
+
+
+DATA_DIR = os.path.join(_hermes_home(), "plugin-data", "agent-janitor")
 WHITELIST_PATH = os.path.join(DATA_DIR, "whitelist.json")
 MODE_PATH = os.path.join(DATA_DIR, "policy_mode")
 HISTORY_PATH = os.path.join(DATA_DIR, "sweeps.jsonl")

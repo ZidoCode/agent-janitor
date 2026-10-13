@@ -11,9 +11,18 @@ import os
 import sqlite3
 import time
 
+def _hermes_home() -> str:
+    """Active Hermes home (profile-aware), with a safe fallback."""
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), ".hermes")
+
+
 LEDGER_CANDIDATES = [
-    os.path.expanduser("~/.hermes/agent-ledger/ledger.db"),
-    os.path.expanduser("~/.hermes/plugins/agent-ledger/ledger.db"),
+    os.path.join(_hermes_home(), "plugin-data", "agent-ledger", "ledger.db"),
+    os.path.join(_hermes_home(), "agent-ledger", "ledger.db"),
 ]
 
 SPAWN_PATTERN = __import__("re").compile(
